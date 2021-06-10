@@ -13,11 +13,18 @@ class Sound():
     path: str
     chan: discord.VoiceChannel
     name: str
+    guild_id: str
 
     def __repr__(self) -> str:
         return self.name
 
 
+class QueueStruct():
+    sound_queue: queue.Queue = queue.Queue(20)
+    queue_event: asyncio.Event = asyncio.Event()
+
+
+queue_dict: Dict[str, QueueStruct] = dict()
 sound_queue = queue.Queue(20)
 queue_event = asyncio.Event()
 
@@ -27,19 +34,20 @@ class MyClient(discord.Client):
         super().__init__(*args, **kwargs)
 
         # create the background task and run it in the background
-        self.bg_task = self.loop.create_task(self.my_background_task())
+        # self.bg_task = self.loop.create_task(self.my_background_task())
+        self.bg_task = list()
 
     async def on_ready(self):
         print(f'Logged in as {self.user} (ID: {self.user.id})')
         print('------')
 
-    async def my_background_task(self):
+    async def my_background_task(self, guild_id):
         await self.wait_until_ready()
         while True:
-            await queue_event.wait()
-            queue_event.clear()
+            await queue_dict[guild_id].queue_event.wait()
+            queue_dict[guild_id].queue_event.clear()
             print("received sound")
-            sound: Sound = sound_queue.get()
+            sound: Sound = queue_dict[guild_id].sound_queue.get()
             connection = await sound.chan.connect()
             finish_event = asyncio.Event()
 
@@ -50,8 +58,8 @@ class MyClient(discord.Client):
             await finish_event.wait()
             await connection.disconnect()
             print("disconnecting")
-            if not sound_queue.empty():
-                queue_event.set()
+            if not queue_dict[guild_id].sound_queue.empty():
+                queue_dict[guild_id].queue_event.set()
 
 
 client = MyClient()
@@ -96,28 +104,35 @@ async def on_message(message):
         for chan in message.guild.voice_channels:
             if chan.name == target_channel:
                 found = True
-                guild_id = message.guild.id
+                guild_id = str(message.guild.id)
                 target_sound = message.content.split()[1]
-                path = str(guild_id) + "/" + target_sound + ".mp3"
+                path = guild_id + "/" + target_sound + ".mp3"
                 file_exists = os.path.exists(path)
                 if(file_exists):
                     sound = Sound()
                     sound.chan = chan
                     sound.path = path
                     sound.name = target_sound
-                    sound_queue.put(sound)
-                    queue_event.set()
+                    sound.guild_id = guild_id
+                    if guild_id not in queue_dict:
+                        queue_dict[guild_id] = QueueStruct()
+                        client.bg_task.append(
+                            client.loop.create_task(client.my_background_task(guild_id)))
+                    queue_dict[guild_id].sound_queue.put(sound)
+                    queue_dict[guild_id].queue_event.set()
                 else:
                     await message.channel.send('Sound doesn\'t exist..')
         if not found:
             await message.channel.send('Channel doesn\'t exist..')
 
     if message.content.lower().startswith('$queue'):
-        await message.channel.send(list(sound_queue.queue))
+        guild_id = str(message.guild.id)
+        await message.channel.send(list(queue_dict[guild_id].sound_queue.queue))
 
     if message.content.lower().startswith('$clear'):
+        guild_id = str(message.guild.id)
         with sound_queue.mutex:
-            sound_queue.queue.clear()
+            queue_dict[guild_id].sound_queue.queue.clear()
         await message.channel.send('Queue cleared')
 
 
